@@ -14,6 +14,7 @@ import sys
 import argparse
 import random
 import hashlib
+import time
 from shutil import which
 from contextlib import suppress
 from pathlib import Path
@@ -21,6 +22,9 @@ from shutil import rmtree
 
 
 KEY_JUPYTER_DATA_DIR = 'JUPYTER_DATA_DIR'
+
+def print_error(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
 
 def is_project_root_dir(x):
     return x.parent if x.is_dir() else None
@@ -32,6 +36,14 @@ ROOT_SPECS = {
     '.git': is_project_root_dir,
     'pyproject.toml': is_project_root_file,
 }
+
+def make_password(plain_password):
+    salt_len = 12  # notebook.auth.salt_len
+    h = hashlib.new('sha1')
+    salt = f"{random.getrandbits(4 * salt_len):0{salt_len}x}"
+    h.update(plain_password.encode('utf-8') + salt.encode('ascii'))
+    password = ':'.join(('sha1', salt, h.hexdigest()))
+    return password
 
 def find_project_root_recurse(d, find_root):
     rel = d.relative_to(find_root)  # raise ValueError if d outside find_root
@@ -63,6 +75,7 @@ def main():
         prog='Jupyter Notebook Wrapper',
         description='Run jupyter lab or notebook')
 
+    parser.add_argument('--ip')
     parser.add_argument('--nb-verbose', action='store_true')
     parser.add_argument('--only-update-kernel', action='store_true')
     parser.add_argument('-N', '--no-password', action='store_true')
@@ -88,15 +101,15 @@ def main():
     os.environ[KEY_JUPYTER_DATA_DIR] = str(Path(jupyter_data_dir).absolute())
 
     if args.nb_verbose:
-        print(f'Target python executable is {python_executable}')
-        print(f'Target kernel path is {kernel_path}')
+        print_error(f'Target python executable is {python_executable}')
+        print_error(f'Target kernel path is {kernel_path}')
 
     # Re-install kernel
-
     try:
         import ipykernel.kernelspec
     except ImportError:
-        print('ipykernel is not installed. please run pip install ipykernel', file=sys.stderr)
+        print_error('\n\n***WARNING***\n\tipykernel is not installed. please run pip install ipykernel\n\n')
+        time.sleep(2)
     else:
         with suppress(FileNotFoundError):
             rmtree(kernel_path)
@@ -111,23 +124,13 @@ def main():
         finally:
             sys.executable = old_executable
 
-    if args.only_update_kernel:
-        return
+    if args.ip is not None:
+        sys.argv += [ '--NotebookApp.ip', args.ip ]
+    else:
+        # change default listen address to 127.0.0.1 for avoid HSTS
+        sys.argv += [ '--NotebookApp.ip', '127.0.0.1' ]
 
-    if args.no_password:
-        sys.argv += [ "--NotebookApp.token", "" ]
-        sys.argv += [ "--NotebookApp.password", "" ]
-        sys.argv += [ "--NotebookApp.password_required", "False" ]
-
-    if args.password is not None:
-        salt_len = 12  # notebook.auth.salt_len
-        h = hashlib.new('sha1')
-        salt = f"{random.getrandbits(4 * salt_len):0{salt_len}x}"
-        h.update(args.password.encode('utf-8') + salt.encode('ascii'))
-        password = ':'.join(('sha1', salt, h.hexdigest()))
-        sys.argv += [ "--NotebookApp.password", password ]
-
-    # run jupyter lab or notebook
+    # check jupyterlab is installed
     if not args.notebook:
         try:
             from jupyterlab.labapp import main as labapp_main
@@ -135,20 +138,32 @@ def main():
             args.notebook = True
             pass
 
+    if args.only_update_kernel:
+        return
+
+    if not args.notebook and args.no_password:
+        # password_required=False does not work for Jupyter lab.
+        args.password = ""  # Use an encrypted blank password instead.
+
+    if args.password is not None:
+        sys.argv += [ "--NotebookApp.password", make_password(args.password) ]
+    else:
+        sys.argv += [ "--NotebookApp.password", "" ]
+
+    if args.no_password:
+        sys.argv += [ "--NotebookApp.token", "" ]
+        sys.argv += [ "--NotebookApp.password_required", "False" ]
+
     if args.notebook:
         try:
             from jupyter_core.command import main
         except ImportError:
-            print('Please install notebook or jupyterlab', file=sys.stderr)
+            print_error('Please install notebook or jupyterlab')
             sys.exit(1)
         else:
             sys.argv = [sys.executable, 'notebook'] + sys.argv[1:]
             main()
     else:
-        if args.no_password:
-            print('warning: Can not use --no-password option for jupyter lab!', file=sys.stderr)
-        # if '--ip' not in sys.argv:
-        #     sys.argv += [ '--ip', '127.0.0.1' ]
         sys.argv += [ '--MultiKernelManager.default_kernel_name', kernel_name ]
         labapp_main(argv=sys.argv[1:])
 
